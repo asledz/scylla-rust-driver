@@ -522,6 +522,9 @@ pub async fn open_named_connection(
         }
     }
 
+    if !connection.get_is_shard_aware() && connection.shard_info != None {
+        eprintln!("Warning: Connection uses non-shard-aware port. Consider changing to shard-aware one to improve database performance.");
+    }
     Ok(connection)
 }
 
