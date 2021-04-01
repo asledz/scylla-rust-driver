@@ -28,9 +28,42 @@ pub struct Prepared {
     result_metadata: ResultMetadata,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum SchemaChangeType {
+    Created,
+    Updated,
+    Dropped,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SchemaChangeTarget {
+    Keyspace,
+    Table,
+    Type,
+    Function,
+    Aggregate,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SchemaEventType {
+    TopologyChange {
+        node_change: bool,
+        addres: IpAddr,
+    },
+    StatusChange {
+        node_up: bool,
+        addres: IpAddr,
+    },
+    SchemaChangeEvent {
+        change_type: SchemaChangeType,
+        target: SchemaChangeTarget,
+        options: String,
+    },
+}
+
 #[derive(Debug)]
 pub struct SchemaChange {
-    // TODO
+    pub event_type: SchemaEventType,
 }
 
 #[derive(Clone, Debug)]
@@ -780,9 +813,151 @@ fn deser_prepared(buf: &mut &[u8]) -> StdResult<Prepared, ParseError> {
     })
 }
 
+fn delete_characters(s: &mut String, pos: usize) {
+    match s.char_indices().nth(pos) {
+        Some((pos, _)) => {
+            s.drain(..pos);
+        }
+        None => {
+            s.clear();
+        }
+    }
+}
+
 #[allow(clippy::unnecessary_wraps)]
-fn deser_schema_change(_buf: &mut &[u8]) -> StdResult<SchemaChange, ParseError> {
-    Ok(SchemaChange {}) // TODO
+fn deser_schema_change(buf: &mut &[u8]) -> StdResult<SchemaChange, ParseError> {
+    let mut keyspace_event = types::read_string(buf)?.to_string();
+    let topology_change = "TOPOLOGY_CHANGE";
+    let status_change = "STATUS_CHANGE";
+    let schema_change = "SCHEMA_CHANGE";
+
+    if keyspace_event.starts_with(topology_change) {
+        delete_characters(&mut keyspace_event, topology_change.len());
+
+        let new_node = "NEW_NODE";
+        let removed_node = "REMOVED_NODE";
+        let node = keyspace_event.starts_with(new_node);
+        if node {
+            delete_characters(&mut keyspace_event, new_node.len());
+        } else {
+            delete_characters(&mut keyspace_event, removed_node.len());
+        }
+        let inet_addres = match buf.len() {
+            4 => {
+                let addres = IpAddr::from(<[u8; 4]>::try_from(&buf[0..4])?);
+                delete_characters(&mut keyspace_event, 4);
+                addres
+            }
+            16 => {
+                let addres = IpAddr::from(<[u8; 16]>::try_from(&buf[0..16])?);
+                delete_characters(&mut keyspace_event, 16);
+                addres
+            }
+            _ => {
+                return Err(ParseError::BadData(format!(
+                    "Schema change inet addres has inncorect length: {}",
+                    buf.len()
+                )))
+            }
+        };
+        Ok(SchemaChange {
+            event_type: SchemaEventType::TopologyChange {
+                node_change: node,
+                addres: inet_addres,
+            },
+        })
+    } else if keyspace_event.starts_with(status_change) {
+        delete_characters(&mut keyspace_event, status_change.len());
+
+        let node_up_string = "UP";
+        let node_down_string = "DOWN";
+
+        let node_up = keyspace_event.starts_with(node_up_string);
+        if node_up {
+            delete_characters(&mut keyspace_event, node_up_string.len());
+        } else {
+            delete_characters(&mut keyspace_event, node_down_string.len());
+        }
+
+        let node_addres = match buf.len() {
+            4 => {
+                let addres = IpAddr::from(<[u8; 4]>::try_from(&buf[0..4])?);
+                delete_characters(&mut keyspace_event, 4);
+                addres
+            }
+            16 => {
+                let addres = IpAddr::from(<[u8; 16]>::try_from(&buf[0..16])?);
+                delete_characters(&mut keyspace_event, 16);
+                addres
+            }
+            _ => {
+                return Err(ParseError::BadData(format!(
+                    "Schema change: inet addres has inncorect length: {}",
+                    buf.len()
+                )))
+            }
+        };
+
+        Ok(SchemaChange {
+            event_type: SchemaEventType::StatusChange {
+                node_up,
+                addres: node_addres,
+            },
+        })
+    } else if keyspace_event.starts_with(schema_change) {
+        delete_characters(&mut keyspace_event, schema_change.len());
+        let change_type_created = "CREATED";
+        let change_type_updated = "UPDATED";
+        let change_type_dropped = "DROPPED";
+
+        let change_type = if keyspace_event.starts_with(change_type_created) {
+            delete_characters(&mut keyspace_event, change_type_created.len());
+            SchemaChangeType::Created
+        } else if keyspace_event.starts_with(change_type_dropped) {
+            delete_characters(&mut keyspace_event, change_type_dropped.len());
+            SchemaChangeType::Dropped
+        } else {
+            delete_characters(&mut keyspace_event, change_type_updated.len());
+            SchemaChangeType::Updated
+        };
+
+        let change_target_keyspace = "KEYSPACE";
+        let change_target_table = "TABLE";
+        let change_target_type = "TYPE";
+        let change_target_function = "FUNCTION";
+        let change_target_aggregate = "AGGREGATE";
+
+        let change_target = if keyspace_event.starts_with(change_target_keyspace) {
+            delete_characters(&mut keyspace_event, change_target_keyspace.len());
+            SchemaChangeTarget::Keyspace
+        } else if keyspace_event.starts_with(change_target_table) {
+            delete_characters(&mut keyspace_event, change_target_table.len());
+            SchemaChangeTarget::Table
+        } else if keyspace_event.starts_with(change_target_type) {
+            delete_characters(&mut keyspace_event, change_target_type.len());
+            SchemaChangeTarget::Type
+        } else if keyspace_event.starts_with(change_target_function) {
+            delete_characters(&mut keyspace_event, change_target_function.len());
+            SchemaChangeTarget::Function
+        } else {
+            delete_characters(&mut keyspace_event, change_target_aggregate.len());
+            SchemaChangeTarget::Aggregate
+        };
+
+        Ok(SchemaChange {
+            event_type: SchemaEventType::SchemaChangeEvent {
+                change_type,
+                target: change_target,
+                options: keyspace_event,
+            },
+        })
+    } else {
+        return Err(ParseError::BadData(format!(
+            "Unknown schema change query: {}",
+            keyspace_event
+        )));
+    }
+    // Ok(SchemaChange {}) // TODO
 }
 
 pub fn deserialize(buf: &mut &[u8]) -> StdResult<Result, ParseError> {
